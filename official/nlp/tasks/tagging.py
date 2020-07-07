@@ -25,11 +25,21 @@ import tensorflow as tf
 import tensorflow_hub as hub
 
 from official.core import base_task
+from official.modeling.hyperparams import base_config
 from official.modeling.hyperparams import config_definitions as cfg
 from official.nlp.configs import encoders
-from official.nlp.data import tagging_data_loader
+from official.nlp.data import data_loader_factory
 from official.nlp.modeling import models
 from official.nlp.tasks import utils
+
+
+@dataclasses.dataclass
+class ModelConfig(base_config.Config):
+  """A base span labeler configuration."""
+  encoder: encoders.TransformerEncoderConfig = (
+      encoders.TransformerEncoderConfig())
+  head_dropout: float = 0.1
+  head_initializer_range: float = 0.02
 
 
 @dataclasses.dataclass
@@ -38,8 +48,7 @@ class TaggingConfig(cfg.TaskConfig):
   # At most one of `init_checkpoint` and `hub_module_url` can be specified.
   init_checkpoint: str = ''
   hub_module_url: str = ''
-  model: encoders.TransformerEncoderConfig = (
-      encoders.TransformerEncoderConfig())
+  model: ModelConfig = ModelConfig()
 
   # The real class names, the order of which should match real label id.
   # Note that a word may be tokenized into multiple word_pieces tokens, and
@@ -75,8 +84,8 @@ def _masked_labels_and_weights(y_true):
 class TaggingTask(base_task.Task):
   """Task object for tagging (e.g., NER or POS)."""
 
-  def __init__(self, params=cfg.TaskConfig):
-    super(TaggingTask, self).__init__(params)
+  def __init__(self, params=cfg.TaskConfig, logging_dir=None):
+    super(TaggingTask, self).__init__(params, logging_dir)
     if params.hub_module_url and params.init_checkpoint:
       raise ValueError('At most one of `hub_module_url` and '
                        '`init_checkpoint` can be specified.')
@@ -93,14 +102,14 @@ class TaggingTask(base_task.Task):
       encoder_network = utils.get_encoder_from_hub(self._hub_module)
     else:
       encoder_network = encoders.instantiate_encoder_from_cfg(
-          self.task_config.model)
+          self.task_config.model.encoder)
 
     return models.BertTokenClassifier(
         network=encoder_network,
         num_classes=len(self.task_config.class_names),
         initializer=tf.keras.initializers.TruncatedNormal(
-            stddev=self.task_config.model.initializer_range),
-        dropout_rate=self.task_config.model.dropout_rate,
+            stddev=self.task_config.model.head_initializer_range),
+        dropout_rate=self.task_config.model.head_dropout,
         output='logits')
 
   def build_losses(self, labels, model_outputs, aux_losses=None) -> tf.Tensor:
@@ -138,8 +147,7 @@ class TaggingTask(base_task.Task):
           dummy_data, num_parallel_calls=tf.data.experimental.AUTOTUNE)
       return dataset
 
-    dataset = tagging_data_loader.TaggingDataLoader(params).load(input_context)
-    return dataset
+    return data_loader_factory.get_data_loader(params).load(input_context)
 
   def validation_step(self, inputs, model: tf.keras.Model, metrics=None):
     """Validatation step.
@@ -213,5 +221,5 @@ class TaggingTask(base_task.Task):
     ckpt = tf.train.Checkpoint(**model.checkpoint_items)
     status = ckpt.restore(ckpt_dir_or_file)
     status.expect_partial().assert_existing_objects_matched()
-    logging.info('finished loading pretrained checkpoint from %s',
+    logging.info('Finished loading pretrained checkpoint from %s',
                  ckpt_dir_or_file)
